@@ -23,7 +23,7 @@ class TextProcessor:
         self.file_path = file_path
         self.n_keywords = n_keywords
         self.text = self._read_file()
-        self.stop_words = set(stopwords.words('russian'))
+        self.stop_words = list(set(stopwords.words('russian')))
         self.n_gram_range = (n_gram_range[0], n_gram_range[1]+1)
 
     def _read_file(self):
@@ -33,7 +33,14 @@ class TextProcessor:
     def _tokenize_text(self):
         tokens = [word for word in word_tokenize(self.text.lower()) if word.isalnum() and word not in self.stop_words]
         n_grams = []
-        for i_gram in range(self.n_gram_range):
+        for i_gram in range(self.n_gram_range[1]):
+            n_grams += [' '.join(gram) for gram in ngrams(tokens, i_gram)]
+        return n_grams
+
+    def _tokenize_chunk(self, chunk_text, n_gram_range=(1, 6)):
+        tokens = [word for word in word_tokenize(chunk_text.lower()) if word.isalnum() and word not in self.stop_words]
+        n_grams = []
+        for i_gram in range(n_gram_range[0], n_gram_range[1] + 1):
             n_grams += [' '.join(gram) for gram in ngrams(tokens, i_gram)]
         return n_grams
 
@@ -75,16 +82,40 @@ class TextProcessor:
         keywords = [(keyword, 1.0) for keyword in keywords if keyword not in self.stop_words]
         return keywords
 
-    def extract_keywords_bert(self):
+    def extract_keywords_bert(self, max_length=512, stride=5):
         tokenizer = BertTokenizer.from_pretrained('cointegrated/rubert-tiny2')
         model = BertModel.from_pretrained('cointegrated/rubert-tiny2')
-        tokens = self._tokenize_text()
-        inputs = tokenizer(tokens, return_tensors='pt', max_length=2048, truncation=True, padding=True)
-        outputs = model(**inputs)
-        embeddings = outputs.last_hidden_state.mean(dim=1)
-        scores = [(token, torch.norm(embedding).item()) for token, embedding in zip(tokens, embeddings)]
-        keywords = sorted(scores, key=lambda x: x[1], reverse=True)
-        return keywords[:self.n_keywords]
+
+        words = word_tokenize(self.text.lower())
+        chunk_size = max_length - 2  # account for [CLS] and [SEP]
+        chunks = [words[i:i + chunk_size] for i in range(0, len(words), chunk_size - stride)]
+
+        all_keywords = []
+
+        for chunk in chunks:
+            chunk_text = ' '.join(chunk)
+            tokens = self._tokenize_chunk(chunk_text, n_gram_range=(1, 5))
+            if not tokens:
+                continue
+
+            inputs = tokenizer(tokens, return_tensors='pt', max_length=max_length, truncation=True, padding=True)
+            outputs = model(**inputs)
+            embeddings = outputs.last_hidden_state.mean(dim=1)
+            scores = [(token, torch.norm(embedding).item()) for token, embedding in zip(tokens, embeddings)]
+            all_keywords.extend(scores)
+
+        # Aggregate scores
+        keyword_scores = {}
+        for keyword, score in all_keywords:
+            if len(keyword.split()) > 1:
+                score *= (len(keyword.split())*1.1)  # boost score for bigger keywords
+            if keyword in keyword_scores:
+                keyword_scores[keyword] += score
+            else:
+                keyword_scores[keyword] = score
+
+        sorted_keywords = sorted(keyword_scores.items(), key=lambda x: x[1], reverse=True)
+        return sorted_keywords[:self.n_keywords]
 
     @staticmethod
     def save_to_csv(keywords, output_file='keywords.csv'):
